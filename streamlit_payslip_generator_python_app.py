@@ -29,8 +29,8 @@ COMPANY_NAME = "REKS Amusement Com Inc"
 DEPARTMENT = "Marketing Department"
 
 # Default admin username/password for first-run (override via Streamlit secrets)
-DEFAULT_ADMIN_USERNAME = "ADMIN"
-DEFAULT_ADMIN_PASSWORD = "RAMS2024!!"
+DEFAULT_ADMIN_USERNAME = "admin"
+DEFAULT_ADMIN_PASSWORD = "admin"
 
 # ---------------------- Utility / Security ----------------------
 def _random_salt(n_bytes: int = 16) -> str:
