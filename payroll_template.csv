@@ -1,0 +1,6 @@
+emp_id,period_start,period_end,basic_pay,overtime_pay,allowances,sss,philhealth,pagibig,tax,other_deductions,notes
+E001,01/08/2025,15/08/2025,11000,0,5000,1100,550,200,0,0,Allowance is Bonus
+E002,01/08/2025,15/08/2025,14000,0,5000,1400,700,200,0,0,Allowance is Bonus
+E003,01/08/2025,15/08/2025,15000,0,5000,1500,750,200,0,0,Allowance is Bonus
+E004,01/08/2025,15/08/2025,9500,0,,950,475,200,0,0,
+E005,01/08/2025,15/08/2025,10000,0,,2030,500,200,0,0,
