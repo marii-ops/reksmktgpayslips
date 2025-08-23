@@ -465,7 +465,7 @@ def login_ui():
                 st.sidebar.error("Invalid admin credentials.")
             else:
                 st.session_state["auth"] = res
-                st.experimental_rerun()
+                st.rerun()
 
 # ---------------------- UI: Dashboards ----------------------
 def employee_dashboard(company, address, tin):
