@@ -586,7 +586,7 @@ def main():
     init_db()
     ensure_admin_exists()
 
-    st.title("💸 Payslip Portal — Login + HR Encoding")
+    st.title("REKS Amusement Com Inc - Payslip Portal")
     st.caption("Employees log in to view/download payslips. HR/Admin manages data.")
 
     with st.sidebar:
