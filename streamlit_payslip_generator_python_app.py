@@ -29,8 +29,8 @@ COMPANY_NAME = "REKS Amusement Com Inc"
 DEPARTMENT = "Marketing Department"
 
 # Default admin username/password for first-run (override via Streamlit secrets)
-DEFAULT_ADMIN_USERNAME = "admin"
-DEFAULT_ADMIN_PASSWORD = "admin"
+DEFAULT_ADMIN_USERNAME = "ADMIN"
+DEFAULT_ADMIN_PASSWORD = "RAMS2024!!"
 
 # ---------------------- Utility / Security ----------------------
 def _random_salt(n_bytes: int = 16) -> str:
@@ -501,7 +501,7 @@ def employee_dashboard(company, address, tin):
         st.download_button(label="Click to save PDF", data=pdf_bytes, file_name=filename, mime="application/pdf")
 
 def hr_dashboard(company, address, tin):
-    st.header("🛠️ HR / Admin Dashboard")
+    st.header("Admin Dashboard")
     tabs = st.tabs(["Employees", "Set/Reset Passwords", "Add Payroll", "Bulk Upload", "Merge Duplicates", "All Payroll Records"])
 
     # Employees management
