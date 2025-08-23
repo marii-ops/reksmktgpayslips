@@ -28,8 +28,8 @@ DB_PATH = "reks_payslip.db"
 COMPANY_NAME = "REKS Amusement Com Inc"
 DEPARTMENT = "Marketing Department"
 
-DEFAULT_ADMIN_USERNAME = "admin"
-DEFAULT_ADMIN_PASSWORD = "admin"  # change via Streamlit Secrets in production
+DEFAULT_ADMIN_USERNAME = "ADMIN"
+DEFAULT_ADMIN_PASSWORD = "RAMS2025!!"  # change via Streamlit Secrets in production
 
 # -------------------- SECURITY HELPERS --------------------
 def _random_salt(n_bytes: int = 16) -> str:
