@@ -41,6 +41,14 @@ def _hash_password(password: str, salt: str) -> str:
 # -------------------- DB HELPERS --------------------
 def get_conn():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
+    
+def export_employees_csv() -> bytes:
+    df = list_employees_df()
+    return df.to_csv(index=False).encode("utf-8")
+
+def export_payroll_csv() -> bytes:
+    df = list_payroll_df()
+    return df.to_csv(index=False).encode("utf-8")
 
 def init_db():
     conn = get_conn()
@@ -475,7 +483,8 @@ def employee_dashboard(company, address, tin):
 
 def hr_dashboard(company, address, tin):
     st.header("🛠️ HR / Admin Dashboard")
-    tabs = st.tabs(["Employees", "Set/Reset Passwords", "Add/Manage Payroll", "Bulk Uploads", "Merge Duplicates", "All Payroll Records"])
+    tabs = st.tabs([
+    "Employees", "Set/Reset Passwords", "Add/Manage Payroll","Bulk Uploads", "Merge Duplicates", "All Payroll Records", "Backup / Restore"])
     # Employees tab
     with tabs[0]:
         st.subheader("Employees")
@@ -658,6 +667,73 @@ def hr_dashboard(company, address, tin):
                     st.error(f"Error deleting payroll record: {e}")
             else:
                 st.warning("Enter a payroll record id.")
+
+    # Back up and Restore
+    with tabs[6]:
+    st.subheader("Backup / Restore")
+
+    st.markdown("**Download Backups**")
+    st.download_button(
+        "⬇️ Download employees.csv",
+        data=export_employees_csv(),
+        file_name="employees_backup.csv",
+        mime="text/csv"
+    )
+    st.download_button(
+        "⬇️ Download payroll.csv",
+        data=export_payroll_csv(),
+        file_name="payroll_backup.csv",
+        mime="text/csv"
+    )
+
+    st.divider()
+    st.markdown("**Restore from CSV**")
+
+    emp_file = st.file_uploader("Upload employees.csv", type=["csv"], key="restore_emp")
+    if emp_file is not None and st.button("Restore Employees"):
+        try:
+            df = pd.read_csv(emp_file)
+            # expected columns: emp_id, full_name, position, department, rate_type, base_rate
+            for _, r in df.iterrows():
+                upsert_employee(
+                    r.get("emp_id"),
+                    r.get("full_name"),
+                    r.get("position", ""),
+                    r.get("department", ""),
+                    r.get("rate_type", ""),
+                    float(r.get("base_rate") or 0),
+                )
+            st.success(f"Employees restored: {len(df)}")
+        except Exception as e:
+            st.error(f"Restore failed: {e}")
+
+    pay_file = st.file_uploader("Upload payroll.csv", type=["csv"], key="restore_pay")
+    if pay_file is not None and st.button("Restore Payroll"):
+        try:
+            dfp = pd.read_csv(pay_file)
+            req = {"emp_id", "period_start", "period_end"}
+            if not req.issubset(set(dfp.columns)):
+                st.error("Payroll CSV must include emp_id, period_start, period_end")
+            else:
+                for _, r in dfp.iterrows():
+                    insert_or_update_payroll({
+                        "emp_id": r.get("emp_id"),
+                        "period_start": str(r.get("period_start")),
+                        "period_end": str(r.get("period_end")),
+                        "basic_pay": float(r.get("basic_pay") or 0),
+                        "overtime_pay": float(r.get("overtime_pay") or 0),
+                        "allowances": float(r.get("allowances") or 0),
+                        "sss": float(r.get("sss") or 0),
+                        "philhealth": float(r.get("philhealth") or 0),
+                        "pagibig": float(r.get("pagibig") or 0),
+                        "tax": float(r.get("tax") or 0),
+                        "other_deductions": float(r.get("other_deductions") or 0),
+                        "notes": str(r.get("notes") or ""),
+                    })
+                st.success(f"Payroll rows restored: {len(dfp)}")
+        except Exception as e:
+            st.error(f"Restore failed: {e}")
+
 
 # -------------------- APP MAIN --------------------
 def main():
