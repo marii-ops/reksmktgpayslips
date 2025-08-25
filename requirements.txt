@@ -1,4 +1,13 @@
+# Web framework
 streamlit
+
+# Database
 psycopg2-binary
+sqlalchemy
+
+# Data handling
 pandas
-reportlab
+openpyxl
+
+# Utils
+python-dotenv
