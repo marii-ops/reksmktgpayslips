@@ -670,29 +670,29 @@ def hr_dashboard(company, address, tin):
 
     # Back up and Restore
     with tabs[6]:
-    st.subheader("Backup / Restore")
+        st.subheader("Backup / Restore")
 
-    st.markdown("**Download Backups**")
-    st.download_button(
+        st.markdown("**Download Backups**")
+        st.download_button(
         "⬇️ Download employees.csv",
         data=export_employees_csv(),
         file_name="employees_backup.csv",
         mime="text/csv"
-    )
-    st.download_button(
+        )
+        st.download_button(
         "⬇️ Download payroll.csv",
         data=export_payroll_csv(),
         file_name="payroll_backup.csv",
         mime="text/csv"
-    )
+        )
 
-    st.divider()
-    st.markdown("**Restore from CSV**")
+        st.divider()
+        st.markdown("**Restore from CSV**")
 
-    emp_file = st.file_uploader("Upload employees.csv", type=["csv"], key="restore_emp")
-    if emp_file is not None and st.button("Restore Employees"):
-        try:
-            df = pd.read_csv(emp_file)
+        emp_file = st.file_uploader("Upload employees.csv", type=["csv"], key="restore_emp")
+            if emp_file is not None and st.button("Restore Employees"):
+                try:
+                    df = pd.read_csv(emp_file)
             # expected columns: emp_id, full_name, position, department, rate_type, base_rate
             for _, r in df.iterrows():
                 upsert_employee(
@@ -703,15 +703,15 @@ def hr_dashboard(company, address, tin):
                     r.get("rate_type", ""),
                     float(r.get("base_rate") or 0),
                 )
-            st.success(f"Employees restored: {len(df)}")
-        except Exception as e:
-            st.error(f"Restore failed: {e}")
+                st.success(f"Employees restored: {len(df)}")
+                except Exception as e:
+                st.error(f"Restore failed: {e}")
 
-    pay_file = st.file_uploader("Upload payroll.csv", type=["csv"], key="restore_pay")
-    if pay_file is not None and st.button("Restore Payroll"):
-        try:
-            dfp = pd.read_csv(pay_file)
-            req = {"emp_id", "period_start", "period_end"}
+        pay_file = st.file_uploader("Upload payroll.csv", type=["csv"], key="restore_pay")
+            if pay_file is not None and st.button("Restore Payroll"):
+                try:
+                    dfp = pd.read_csv(pay_file)
+                    req = {"emp_id", "period_start", "period_end"}
             if not req.issubset(set(dfp.columns)):
                 st.error("Payroll CSV must include emp_id, period_start, period_end")
             else:
@@ -731,8 +731,8 @@ def hr_dashboard(company, address, tin):
                         "notes": str(r.get("notes") or ""),
                     })
                 st.success(f"Payroll rows restored: {len(dfp)}")
-        except Exception as e:
-            st.error(f"Restore failed: {e}")
+            except Exception as e:
+                st.error(f"Restore failed: {e}")
 
 
 # -------------------- APP MAIN --------------------
