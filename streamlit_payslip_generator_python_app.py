@@ -1,23 +1,27 @@
-# reks_payslip_app_postgres.py
-# REKS Amusement Com Inc — Marketing Department
-# Streamlit Payslip Portal using **Supabase PostgreSQL** for persistence.
-# Features:
-# - HR/Admin & Employee login
-# - Add/Update/Delete Employees
-# - Set/Reset Employee Passwords (per-employee login)
-# - Add/Update/Delete Payroll entries (unique per emp_id + period range)
-# - Bulk Upload (CSV) for Employees & Payroll
-# - Merge duplicate payrolls
-# - Backup/Restore to CSV
-# - Generate PDF payslips (ReportLab)
-#
-# How to run locally:
-#   1) pip install -r requirements.txt
-#   2) Create .streamlit/secrets.toml (see setup notes in the chat)
-#   3) streamlit run reks_payslip_app_postgres.py
+"""
+reks_payslip_app_postgres.py
+REKS Amusement Com Inc — Marketing Department
+Streamlit app using Supabase Postgres for persistence.
+
+How to run:
+1) pip install streamlit pandas psycopg2-binary reportlab
+2) In Streamlit Cloud app settings -> Secrets, add:
+
+[supabase]
+host = "db.sljhsfkniczwbhggbofk.supabase.co"
+port = "5432"
+dbname = "postgres"
+user = "postgres"
+password = "YOUR-PASSWORD"
+
+OPTIONAL:
+ADMIN_USERNAME = "admin"
+ADMIN_PASSWORD = "admin"
+
+3) streamlit run reks_payslip_app_postgres.py
+"""
 
 import io
-import os
 import binascii
 import hashlib
 from datetime import datetime, date
@@ -28,116 +32,114 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
 from reportlab.lib import colors
+
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
-# -------------------- COMPANY CONFIG --------------------
+# -------------------- Config --------------------
 COMPANY_NAME = "REKS Amusement Com Inc"
 DEPARTMENT = "Marketing Department"
 
-# -------------------- SECURITY HELPERS --------------------
+# -------------------- Security helpers --------------------
 def _random_salt(n_bytes: int = 16) -> str:
-    return binascii.hexlify(os.urandom(n_bytes)).decode()
+    return binascii.hexlify(__import__("os").urandom(n_bytes)).decode()
 
 def _hash_password(password: str, salt: str) -> str:
     return hashlib.sha256((salt + password).encode("utf-8")).hexdigest()
 
-# -------------------- DB CONNECTION --------------------
-# Expect these in Streamlit secrets:
-# db_host, db_name, db_user, db_password
-
+# -------------------- DB Connection --------------------
 @st.cache_resource(show_spinner=False)
 def get_conn():
-    try:
-        conn = psycopg2.connect(
-            host=st.secrets["db_host"],
-            dbname=st.secrets["db_name"],
-            user=st.secrets["db_user"],
-            password=st.secrets["db_password"],
-            port=st.secrets.get("db_port", 5432),
-        )
-        return conn
-    except Exception as e:
-        st.error(f"Database connection failed: {e}")
-        raise
+    """
+    Returns a psycopg2 connection using Streamlit secrets under "supabase".
+    Make sure you set secrets as documented in the file header.
+    """
+    cfg = st.secrets["supabase"]
+    conn = psycopg2.connect(
+        host=cfg["host"],
+        dbname=cfg.get("dbname", cfg.get("database", "postgres")),
+        user=cfg["user"],
+        password=cfg["password"],
+        port=int(cfg.get("port", 5432)),
+    )
+    return conn
 
-# -------------------- DB INIT --------------------
-
+# -------------------- DB initialization --------------------
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
+    # employees table: emp_id is our employee username/key
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS employees (
+        emp_id TEXT PRIMARY KEY,
+        full_name TEXT NOT NULL,
+        position TEXT,
+        department TEXT,
+        rate_type TEXT,
+        base_rate NUMERIC,
+        created_at TIMESTAMP DEFAULT NOW()
+    );
+    """)
 
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS employees (
-            emp_id TEXT PRIMARY KEY,
-            full_name TEXT NOT NULL,
-            position TEXT,
-            department TEXT,
-            rate_type TEXT,
-            base_rate NUMERIC,
-            created_at TIMESTAMP DEFAULT NOW()
-        )
-        """
-    )
+    # payroll table: unique constraint on emp_id + period_start + period_end
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS payroll (
+        id SERIAL PRIMARY KEY,
+        emp_id TEXT NOT NULL REFERENCES employees(emp_id) ON DELETE CASCADE,
+        period_start DATE NOT NULL,
+        period_end DATE NOT NULL,
+        basic_pay NUMERIC DEFAULT 0,
+        overtime_pay NUMERIC DEFAULT 0,
+        allowances NUMERIC DEFAULT 0,
+        sss NUMERIC DEFAULT 0,
+        philhealth NUMERIC DEFAULT 0,
+        pagibig NUMERIC DEFAULT 0,
+        tax NUMERIC DEFAULT 0,
+        other_deductions NUMERIC DEFAULT 0,
+        notes TEXT,
+        created_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE (emp_id, period_start, period_end)
+    );
+    """)
 
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS payroll (
-            id SERIAL PRIMARY KEY,
-            emp_id TEXT NOT NULL REFERENCES employees(emp_id) ON DELETE CASCADE,
-            period_start DATE NOT NULL,
-            period_end DATE NOT NULL,
-            basic_pay NUMERIC DEFAULT 0,
-            overtime_pay NUMERIC DEFAULT 0,
-            allowances NUMERIC DEFAULT 0,
-            sss NUMERIC DEFAULT 0,
-            philhealth NUMERIC DEFAULT 0,
-            pagibig NUMERIC DEFAULT 0,
-            tax NUMERIC DEFAULT 0,
-            other_deductions NUMERIC DEFAULT 0,
-            notes TEXT,
-            created_at TIMESTAMP DEFAULT NOW(),
-            CONSTRAINT uq_emp_period UNIQUE (emp_id, period_start, period_end)
-        )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            username TEXT PRIMARY KEY,
-            role TEXT NOT NULL, -- 'employee' or 'admin'
-            salt TEXT NOT NULL,
-            pwd_hash TEXT NOT NULL,
-            emp_id TEXT REFERENCES employees(emp_id) ON DELETE SET NULL,
-            created_at TIMESTAMP DEFAULT NOW()
-        )
-        """
-    )
-
+    # users table for logins (username can be emp_id for employees)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        username TEXT PRIMARY KEY,
+        role TEXT NOT NULL, -- 'employee' or 'admin'
+        salt TEXT NOT NULL,
+        pwd_hash TEXT NOT NULL,
+        emp_id TEXT REFERENCES employees(emp_id) ON DELETE SET NULL,
+        created_at TIMESTAMP DEFAULT NOW()
+    );
+    """)
     conn.commit()
     cur.close()
 
-
 def ensure_admin_user():
-    username = st.secrets.get("ADMIN_USERNAME", "admin")
-    password = st.secrets.get("ADMIN_PASSWORD", "admin")
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT 1 FROM users WHERE role='admin' LIMIT 1")
-    exists = cur.fetchone()
-    if not exists:
+    cur.execute("SELECT 1 FROM users WHERE role='admin' LIMIT 1;")
+    if cur.fetchone() is None:
+        admin_user = st.secrets.get("ADMIN_USERNAME", "admin")
+        admin_pwd = st.secrets.get("ADMIN_PASSWORD", "admin")
         salt = _random_salt()
-        pwd_hash = _hash_password(password, salt)
+        pwd_hash = _hash_password(admin_pwd, salt)
         cur.execute(
-            "INSERT INTO users (username, role, salt, pwd_hash) VALUES (%s, 'admin', %s, %s)",
-            (username, salt, pwd_hash),
+            "INSERT INTO users (username, role, salt, pwd_hash) VALUES (%s, 'admin', %s, %s) ON CONFLICT (username) DO NOTHING;",
+            (admin_user, salt, pwd_hash),
         )
         conn.commit()
     cur.close()
 
-# -------------------- DATA HELPERS --------------------
+# -------------------- Small helpers --------------------
+def safe_float(v, default=0.0):
+    try:
+        if v is None or (isinstance(v, str) and v.strip() == ""):
+            return float(default)
+        return float(v)
+    except Exception:
+        return float(default)
 
 def peso(amount):
     try:
@@ -145,152 +147,121 @@ def peso(amount):
     except Exception:
         return "₱0.00"
 
-
-def safe_float(v, default=0.0):
-    try:
-        if v == "" or v is None:
-            return float(default)
-        return float(v)
-    except Exception:
-        return float(default)
-
-
+# -------------------- Data functions --------------------
 def upsert_employee(emp_id, full_name, position="", department="", rate_type="", base_rate=0.0):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        """
+    cur.execute("""
         INSERT INTO employees (emp_id, full_name, position, department, rate_type, base_rate)
         VALUES (%s, %s, %s, %s, %s, %s)
         ON CONFLICT (emp_id) DO UPDATE SET
-            full_name=EXCLUDED.full_name,
-            position=EXCLUDED.position,
-            department=EXCLUDED.department,
-            rate_type=EXCLUDED.rate_type,
-            base_rate=EXCLUDED.base_rate
-        """,
-        (str(emp_id).strip(), str(full_name).strip(), str(position).strip(), str(department).strip(), str(rate_type).strip(), safe_float(base_rate)),
-    )
+            full_name = EXCLUDED.full_name,
+            position = EXCLUDED.position,
+            department = EXCLUDED.department,
+            rate_type = EXCLUDED.rate_type,
+            base_rate = EXCLUDED.base_rate;
+    """, (str(emp_id).strip(), str(full_name).strip(), str(position).strip(), str(department).strip(), str(rate_type).strip(), safe_float(base_rate)))
     conn.commit()
     cur.close()
-
 
 def delete_employee(emp_id):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("DELETE FROM users WHERE emp_id=%s OR username=%s", (emp_id, emp_id))
-    cur.execute("DELETE FROM employees WHERE emp_id=%s", (emp_id,))
+    # This will cascade-delete payroll rows because of FK ON DELETE CASCADE
+    cur.execute("DELETE FROM users WHERE emp_id=%s OR username=%s;", (emp_id, emp_id))
+    cur.execute("DELETE FROM employees WHERE emp_id=%s;", (emp_id,))
     conn.commit()
     cur.close()
-
 
 def set_employee_password(emp_id, new_password):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT 1 FROM employees WHERE emp_id=%s", (emp_id,))
-    if not cur.fetchone():
+    cur.execute("SELECT 1 FROM employees WHERE emp_id=%s;", (emp_id,))
+    if cur.fetchone() is None:
         cur.close()
         raise ValueError("Employee not found")
     salt = _random_salt()
     pwd_hash = _hash_password(new_password, salt)
-    cur.execute(
-        """
+    cur.execute("""
         INSERT INTO users (username, role, salt, pwd_hash, emp_id)
         VALUES (%s, 'employee', %s, %s, %s)
-        ON CONFLICT (username) DO UPDATE SET
-            salt=EXCLUDED.salt,
-            pwd_hash=EXCLUDED.pwd_hash,
-            emp_id=EXCLUDED.emp_id
-        """,
-        (emp_id, salt, pwd_hash, emp_id),
-    )
+        ON CONFLICT (username) DO UPDATE SET salt=EXCLUDED.salt, pwd_hash=EXCLUDED.pwd_hash, emp_id=EXCLUDED.emp_id;
+    """, (emp_id, salt, pwd_hash, emp_id))
     conn.commit()
     cur.close()
-
 
 def delete_user(username):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("DELETE FROM users WHERE username=%s", (str(username).strip(),))
+    cur.execute("DELETE FROM users WHERE username=%s;", (username,))
     conn.commit()
     cur.close()
 
-
-def insert_or_update_payroll(row):
+def insert_or_update_payroll(row: dict):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO payroll (
-            emp_id, period_start, period_end, basic_pay, overtime_pay, allowances,
-            sss, philhealth, pagibig, tax, other_deductions, notes
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    cur.execute("""
+        INSERT INTO payroll (emp_id, period_start, period_end, basic_pay, overtime_pay, allowances, sss, philhealth, pagibig, tax, other_deductions, notes)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (emp_id, period_start, period_end) DO UPDATE SET
-            basic_pay=EXCLUDED.basic_pay,
-            overtime_pay=EXCLUDED.overtime_pay,
-            allowances=EXCLUDED.allowances,
-            sss=EXCLUDED.sss,
-            philhealth=EXCLUDED.philhealth,
-            pagibig=EXCLUDED.pagibig,
-            tax=EXCLUDED.tax,
-            other_deductions=EXCLUDED.other_deductions,
-            notes=EXCLUDED.notes,
-            created_at=NOW()
-        """,
-        (
-            str(row.get("emp_id") or "").strip(),
-            str(row.get("period_start") or "").strip(),
-            str(row.get("period_end") or "").strip(),
-            safe_float(row.get("basic_pay")),
-            safe_float(row.get("overtime_pay")),
-            safe_float(row.get("allowances")),
-            safe_float(row.get("sss")),
-            safe_float(row.get("philhealth")),
-            safe_float(row.get("pagibig")),
-            safe_float(row.get("tax")),
-            safe_float(row.get("other_deductions")),
-            str(row.get("notes") or ""),
-        ),
-    )
+            basic_pay = EXCLUDED.basic_pay,
+            overtime_pay = EXCLUDED.overtime_pay,
+            allowances = EXCLUDED.allowances,
+            sss = EXCLUDED.sss,
+            philhealth = EXCLUDED.philhealth,
+            pagibig = EXCLUDED.pagibig,
+            tax = EXCLUDED.tax,
+            other_deductions = EXCLUDED.other_deductions,
+            notes = EXCLUDED.notes,
+            created_at = NOW();
+    """, (
+        str(row.get("emp_id") or "").strip(),
+        str(row.get("period_start") or "").strip(),
+        str(row.get("period_end") or "").strip(),
+        safe_float(row.get("basic_pay")),
+        safe_float(row.get("overtime_pay")),
+        safe_float(row.get("allowances")),
+        safe_float(row.get("sss")),
+        safe_float(row.get("philhealth")),
+        safe_float(row.get("pagibig")),
+        safe_float(row.get("tax")),
+        safe_float(row.get("other_deductions")),
+        str(row.get("notes") or "")
+    ))
     conn.commit()
     cur.close()
-
 
 def delete_payroll_by_id(pay_id: int):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("DELETE FROM payroll WHERE id=%s", (int(pay_id),))
+    cur.execute("DELETE FROM payroll WHERE id=%s;", (int(pay_id),))
     conn.commit()
     cur.close()
 
-
 def list_employees_df():
     conn = get_conn()
-    df = pd.read_sql("SELECT emp_id, full_name, position, department, rate_type, base_rate, created_at FROM employees ORDER BY full_name", conn)
+    df = pd.read_sql("SELECT emp_id, full_name, position, department, rate_type, base_rate, created_at FROM employees ORDER BY full_name;", conn)
     return df
-
 
 def list_payroll_df(emp_id=None):
     conn = get_conn()
     if emp_id:
-        df = pd.read_sql("SELECT * FROM payroll WHERE emp_id = %s ORDER BY period_start DESC", conn, params=(emp_id,))
+        df = pd.read_sql("SELECT * FROM payroll WHERE emp_id=%s ORDER BY period_start DESC;", conn, params=(emp_id,))
     else:
-        df = pd.read_sql("SELECT * FROM payroll ORDER BY created_at DESC", conn)
+        df = pd.read_sql("SELECT * FROM payroll ORDER BY created_at DESC;", conn)
     return df
-
 
 def get_employee(emp_id):
     conn = get_conn()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("SELECT emp_id, full_name, position, department FROM employees WHERE emp_id=%s", (str(emp_id).strip(),))
+        cur.execute("SELECT emp_id, full_name, position, department FROM employees WHERE emp_id=%s;", (str(emp_id).strip(),))
         row = cur.fetchone()
         return dict(row) if row else None
-
 
 def verify_login(username, password):
     conn = get_conn()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("SELECT role, salt, pwd_hash, emp_id FROM users WHERE username=%s", (str(username).strip(),))
+        cur.execute("SELECT role, salt, pwd_hash, emp_id FROM users WHERE username=%s;", (str(username).strip(),))
         row = cur.fetchone()
         if not row:
             return None
@@ -298,8 +269,7 @@ def verify_login(username, password):
             return {"role": row["role"], "emp_id": row["emp_id"], "username": username}
         return None
 
-# -------------------- PDF GENERATION --------------------
-
+# -------------------- PDF payslip generation --------------------
 def make_payslip_pdf(company_name, company_address, company_tin, payroll_row: dict, employee_row: dict) -> bytes:
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
@@ -408,7 +378,7 @@ def make_payslip_pdf(company_name, company_address, company_tin, payroll_row: di
     c.drawRightString(width - margin, y, peso(net))
 
     y -= 20
-    notes = (str(payroll_row.get("notes") or "").strip())
+    notes = (str(payroll_row.get("notes") or "")).strip()
     if notes:
         c.setFont("Helvetica", 9)
         c.drawString(x0, y, f"Notes: {notes}")
@@ -423,19 +393,20 @@ def make_payslip_pdf(company_name, company_address, company_tin, payroll_row: di
     buf.close()
     return pdf
 
-# -------------------- CSV & MERGE HELPERS --------------------
-
+# -------------------- CSV helpers & merge duplicates --------------------
 def safe_read_csv(filelike):
     df = pd.read_csv(filelike, dtype=str)
     df.columns = [c.strip().lower() for c in df.columns]
     return df
 
-
 def merge_duplicate_payrolls():
     df = list_payroll_df()
     if df.empty:
         return 0
-    df['key'] = df['emp_id'].astype(str).str.strip() + '|' + df['period_start'].astype(str).str.strip() + '|' + df['period_end'].astype(str).str.strip()
+    # normalize dates to strings for grouping
+    df['period_start'] = pd.to_datetime(df['period_start']).dt.date.astype(str)
+    df['period_end'] = pd.to_datetime(df['period_end']).dt.date.astype(str)
+    df['key'] = df['emp_id'].astype(str).str.strip() + '|' + df['period_start'] + '|' + df['period_end']
     grouped = df.groupby('key', as_index=False)
     merged_count = 0
     conn = get_conn()
@@ -456,43 +427,37 @@ def merge_duplicate_payrolls():
         tax = g['tax'].astype(float).sum()
         other = g['other_deductions'].astype(float).sum()
         notes = ' | '.join([n for n in g['notes'].astype(str).unique() if n and n != 'nan'])
-        # Delete all duplicates, reinsert single merged row via upsert
-        cur.execute("DELETE FROM payroll WHERE emp_id=%s AND period_start=%s AND period_end=%s", (emp_id, ps, pe))
-        cur.execute(
-            """
+        # Remove duplicates then upsert merged row
+        cur.execute("DELETE FROM payroll WHERE emp_id=%s AND period_start=%s AND period_end=%s;", (emp_id, ps, pe))
+        cur.execute("""
             INSERT INTO payroll (emp_id, period_start, period_end, basic_pay, overtime_pay, allowances, sss, philhealth, pagibig, tax, other_deductions, notes)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (emp_id, period_start, period_end) DO UPDATE SET
-                basic_pay=EXCLUDED.basic_pay,
-                overtime_pay=EXCLUDED.overtime_pay,
-                allowances=EXCLUDED.allowances,
-                sss=EXCLUDED.sss,
-                philhealth=EXCLUDED.philhealth,
-                pagibig=EXCLUDED.pagibig,
-                tax=EXCLUDED.tax,
-                other_deductions=EXCLUDED.other_deductions,
-                notes=EXCLUDED.notes,
-                created_at=NOW()
-            """,
-            (emp_id, ps, pe, basic, ot, allow, sss, phil, pag, tax, other, notes),
-        )
+                basic_pay = EXCLUDED.basic_pay,
+                overtime_pay = EXCLUDED.overtime_pay,
+                allowances = EXCLUDED.allowances,
+                sss = EXCLUDED.sss,
+                philhealth = EXCLUDED.philhealth,
+                pagibig = EXCLUDED.pagibig,
+                tax = EXCLUDED.tax,
+                other_deductions = EXCLUDED.other_deductions,
+                notes = EXCLUDED.notes,
+                created_at = NOW();
+        """, (emp_id, ps, pe, basic, ot, allow, sss, phil, pag, tax, other, notes))
     conn.commit()
     cur.close()
     return merged_count
 
-# -------------------- BACKUP & RESTORE HELPERS --------------------
-
+# -------------------- Backup / Restore --------------------
 def export_employees_csv() -> bytes:
     df = list_employees_df()
     return df.to_csv(index=False).encode("utf-8")
-
 
 def export_payroll_csv() -> bytes:
     df = list_payroll_df()
     return df.to_csv(index=False).encode("utf-8")
 
-# -------------------- UI: AUTH --------------------
-
+# -------------------- Auth UI --------------------
 def login_ui():
     st.sidebar.subheader("Sign in")
     mode = st.sidebar.selectbox("Login as", ["Employee", "HR/Admin"])
@@ -520,8 +485,7 @@ def login_ui():
                 st.session_state["auth"] = res
                 st.rerun()
 
-# -------------------- UI: DASHBOARDS --------------------
-
+# -------------------- Dashboards --------------------
 def employee_dashboard(company, address, tin):
     auth = st.session_state.get("auth") or {}
     emp_id = auth.get("emp_id") or auth.get("username")
@@ -529,17 +493,18 @@ def employee_dashboard(company, address, tin):
     if not emp:
         st.error("Employee profile not found. Please contact HR.")
         return
+
     st.header(f"👤 {emp['full_name']} — {emp_id}")
     df = list_payroll_df(emp_id)
     if df.empty:
         st.info("No payroll records yet.")
         return
-    # Period presentation as strings
+    # make readable period column
     df["period_start"] = pd.to_datetime(df["period_start"]).dt.date.astype(str)
     df["period_end"] = pd.to_datetime(df["period_end"]).dt.date.astype(str)
-    df['period'] = df['period_start'] + " to " + df['period_end']
-    period = st.selectbox("Select Pay Period", options=df['period'].tolist())
-    row = df[df['period'] == period].iloc[0].to_dict()
+    df["period"] = df["period_start"] + " to " + df["period_end"]
+    period = st.selectbox("Select Pay Period", options=df["period"].tolist())
+    row = df[df["period"] == period].iloc[0].to_dict()
     gross = safe_float(row.get("basic_pay")) + safe_float(row.get("overtime_pay")) + safe_float(row.get("allowances"))
     deductions = sum(safe_float(row.get(k)) for k in ["sss", "philhealth", "pagibig", "tax", "other_deductions"])
     net = gross - deductions
@@ -547,11 +512,11 @@ def employee_dashboard(company, address, tin):
     col1.metric("Gross Pay", peso(gross))
     col2.metric("Total Deductions", peso(deductions))
     col3.metric("Net Pay", peso(net))
+
     if st.button("Download PDF Payslip", type="primary"):
         pdf_bytes = make_payslip_pdf(company, address, tin, row, emp)
         filename = f"payslip_{emp_id}_{row.get('period_start')}_{row.get('period_end')}.pdf"
         st.download_button(label="Click to save PDF", data=pdf_bytes, file_name=filename, mime="application/pdf")
-
 
 def hr_dashboard(company, address, tin):
     st.header("🛠️ HR / Admin Dashboard")
@@ -560,7 +525,7 @@ def hr_dashboard(company, address, tin):
         "Bulk Uploads", "Merge Duplicates", "All Payroll Records", "Backup / Restore"
     ])
 
-    # --- Employees tab ---
+    # Employees
     with tabs[0]:
         st.subheader("Employees")
         with st.expander("➕ Add / Update Employee"):
@@ -616,7 +581,7 @@ def hr_dashboard(company, address, tin):
             except Exception as e:
                 st.error(f"Failed to import employees: {e}")
 
-    # --- Passwords tab ---
+    # Passwords
     with tabs[1]:
         st.subheader("Set or Reset Employee Password")
         emp_id_pw = st.text_input("Employee ID", key="pw_empid")
@@ -640,7 +605,7 @@ def hr_dashboard(company, address, tin):
             else:
                 st.warning("Enter a username to delete")
 
-    # --- Add/manage payroll ---
+    # Add/manage payroll
     with tabs[2]:
         st.subheader("Add or Update Payroll Entry")
         emp_list = list_employees_df()
@@ -685,7 +650,7 @@ def hr_dashboard(company, address, tin):
                     "pagibig": pagibig,
                     "tax": tax,
                     "other_deductions": other_deductions,
-                    "notes": notes,
+                    "notes": notes
                 })
                 st.success("Payroll saved (inserted or updated).")
 
@@ -703,11 +668,11 @@ def hr_dashboard(company, address, tin):
             else:
                 st.warning("Enter a payroll record id.")
 
-    # --- Bulk Uploads tab ---
+    # Bulk Uploads
     with tabs[3]:
         st.subheader("Bulk Uploads")
         st.markdown("#### Payroll (CSV)")
-        st.caption("Required: emp_id, period_start, period_end. Optional numeric: basic_pay, overtime_pay, allowances, sss, philhealth, pagibig, tax, other_deductions. Optional: notes.")
+        st.caption("Required: emp_id, period_start, period_end. Optional numeric fields and notes.")
         pay_file = st.file_uploader("Upload payroll.csv", type=["csv"], key="bulk_pay")
         if pay_file:
             try:
@@ -730,7 +695,7 @@ def hr_dashboard(company, address, tin):
                             "pagibig": safe_float(r.get("pagibig")),
                             "tax": safe_float(r.get("tax")),
                             "other_deductions": safe_float(r.get("other_deductions")),
-                            "notes": str(r.get("notes") or "").strip(),
+                            "notes": str(r.get("notes") or "").strip()
                         }
                         insert_or_update_payroll(row)
                         count += 1
@@ -740,7 +705,7 @@ def hr_dashboard(company, address, tin):
 
         st.divider()
         st.markdown("#### Employees (CSV)")
-        st.caption("Required: emp_id, full_name (Optional: position, department, rate_type, base_rate)")
+        st.caption("Required: emp_id, full_name (optional: position, department, rate_type, base_rate)")
         emp_file = st.file_uploader("Upload employees.csv", type=["csv"], key="bulk_emp2")
         if emp_file is not None:
             try:
@@ -791,42 +756,29 @@ def hr_dashboard(company, address, tin):
         st.download_button("⬇️ employees_template.csv", emp_template.to_csv(index=False), "employees_template.csv", "text/csv")
         st.download_button("⬇️ payroll_template.csv", pay_template.to_csv(index=False), "payroll_template.csv", "text/csv")
 
-    # --- Merge Duplicates tab ---
+    # Merge duplicates
     with tabs[4]:
         st.subheader("Merge Duplicate Payroll Entries")
-        st.caption("Duplicates share the same emp_id + period_start + period_end. Merging sums numeric fields and concatenates notes.")
+        st.caption("Duplicates share same emp_id + period_start + period_end. Merging sums numeric fields & concatenates notes.")
         if st.button("Run Merge"):
             merged = merge_duplicate_payrolls()
             st.success(f"Merged {merged} rows." if merged else "No duplicates found.")
 
-    # --- All Payroll Records tab ---
+    # All payroll records
     with tabs[5]:
         st.subheader("All Payroll Records")
         df_all = list_payroll_df()
-        # Show dates as strings to avoid timezone formatting quirks
         if not df_all.empty:
             df_all["period_start"] = pd.to_datetime(df_all["period_start"]).dt.date.astype(str)
             df_all["period_end"] = pd.to_datetime(df_all["period_end"]).dt.date.astype(str)
         st.dataframe(df_all, use_container_width=True)
 
-    # --- Backup / Restore tab ---
+    # Backup / Restore
     with tabs[6]:
         st.subheader("Backup / Restore")
-
         st.markdown("**Download Backups**")
-        st.download_button(
-            "⬇️ Download employees.csv",
-            data=export_employees_csv(),
-            file_name="employees_backup.csv",
-            mime="text/csv"
-        )
-        st.download_button(
-            "⬇️ Download payroll.csv",
-            data=export_payroll_csv(),
-            file_name="payroll_backup.csv",
-            mime="text/csv"
-        )
-
+        st.download_button("⬇️ Download employees.csv", data=export_employees_csv(), file_name="employees_backup.csv", mime="text/csv")
+        st.download_button("⬇️ Download payroll.csv", data=export_payroll_csv(), file_name="payroll_backup.csv", mime="text/csv")
         st.divider()
         st.markdown("**Restore from CSV**")
         emp_restore = st.file_uploader("Upload employees.csv", type=["csv"], key="restore_emp")
@@ -877,8 +829,7 @@ def hr_dashboard(company, address, tin):
             except Exception as e:
                 st.error(f"Restore failed: {e}")
 
-# -------------------- APP MAIN --------------------
-
+# -------------------- App main --------------------
 def main():
     st.set_page_config(page_title=f"{COMPANY_NAME} Payroll", page_icon="💸", layout="wide")
     init_db()
@@ -908,7 +859,6 @@ def main():
         hr_dashboard(company_name, company_address, company_tin)
     else:
         st.error("Unknown role in session. Please sign out and sign in again.")
-
 
 if __name__ == "__main__":
     main()
