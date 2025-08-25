@@ -1,13 +1,7 @@
 # reks_payslip_app.py
-# Streamlit Payslip Portal — REKS Amusement Com Inc (Marketing Department)
-# Features:
-# - SQLite storage (employees, users, payroll)
-# - Admin: manage employees, bulk upload employees, set/reset passwords,
-#          manage payroll (add/update/delete), bulk upload payroll, merge duplicates
-# - Employee: login, view periods, download PDF payslip
-#
-# Requirements:
-#   pip install streamlit pandas reportlab
+# REKS Amusement Com Inc — Marketing Department
+# Streamlit Payslip Portal with SQLite persistence, Admin/HR management, Employee self-service,
+# bulk uploads, merge duplicates, and backup/restore.
 
 import io
 import os
@@ -23,13 +17,16 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
 from reportlab.lib import colors
 
-# -------------------- CONFIG --------------------
-DB_PATH = "reks_payslip.db"
+# -------------------- COMPANY CONFIG --------------------
 COMPANY_NAME = "REKS Amusement Com Inc"
 DEPARTMENT = "Marketing Department"
 
-DEFAULT_ADMIN_USERNAME = "ADMIN"
-DEFAULT_ADMIN_PASSWORD = "RAMS2025!!"  # change via Streamlit Secrets in production
+# -------------------- STORAGE CONFIG --------------------
+DB_PATH = "reks_payslip.db"
+
+# -------------------- DEFAULT ADMIN (override via Streamlit Secrets in prod) --------------------
+DEFAULT_ADMIN_USERNAME = "admin"
+DEFAULT_ADMIN_PASSWORD = "admin"  # set ADMIN_PASSWORD in Streamlit Secrets for production
 
 # -------------------- SECURITY HELPERS --------------------
 def _random_salt(n_bytes: int = 16) -> str:
@@ -41,14 +38,6 @@ def _hash_password(password: str, salt: str) -> str:
 # -------------------- DB HELPERS --------------------
 def get_conn():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
-    
-def export_employees_csv() -> bytes:
-    df = list_employees_df()
-    return df.to_csv(index=False).encode("utf-8")
-
-def export_payroll_csv() -> bytes:
-    df = list_payroll_df()
-    return df.to_csv(index=False).encode("utf-8")
 
 def init_db():
     conn = get_conn()
@@ -120,6 +109,14 @@ def peso(amount):
     except Exception:
         return "₱0.00"
 
+def safe_float(v, default=0.0):
+    try:
+        if v == "" or v is None:
+            return float(default)
+        return float(v)
+    except Exception:
+        return float(default)
+
 def upsert_employee(emp_id, full_name, position="", department="", rate_type="", base_rate=0.0):
     conn = get_conn()
     cur = conn.cursor()
@@ -132,16 +129,17 @@ def upsert_employee(emp_id, full_name, position="", department="", rate_type="",
       department=excluded.department,
       rate_type=excluded.rate_type,
       base_rate=excluded.base_rate
-    """, (str(emp_id).strip(), str(full_name).strip(), str(position).strip(), str(department).strip(), str(rate_type).strip(), float(base_rate or 0)))
+    """, (str(emp_id).strip(), str(full_name).strip(), str(position).strip(), str(department).strip(), str(rate_type).strip(), safe_float(base_rate)))
     conn.commit()
     conn.close()
 
 def delete_employee(emp_id):
+    emp_id = str(emp_id).strip()
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("DELETE FROM payroll WHERE emp_id=?", (str(emp_id).strip(),))
-    cur.execute("DELETE FROM users WHERE emp_id=?", (str(emp_id).strip(),))
-    cur.execute("DELETE FROM employees WHERE emp_id=?", (str(emp_id).strip(),))
+    cur.execute("DELETE FROM payroll WHERE emp_id=?", (emp_id,))
+    cur.execute("DELETE FROM users WHERE emp_id=? OR username=?", (emp_id, emp_id))
+    cur.execute("DELETE FROM employees WHERE emp_id=?", (emp_id,))
     conn.commit()
     conn.close()
 
@@ -178,46 +176,36 @@ def insert_or_update_payroll(row):
     cur = conn.cursor()
     cur.execute("SELECT id FROM payroll WHERE emp_id=? AND period_start=? AND period_end=?", (emp_id, period_start, period_end))
     r = cur.fetchone()
+    fields = (
+        safe_float(row.get("basic_pay")),
+        safe_float(row.get("overtime_pay")),
+        safe_float(row.get("allowances")),
+        safe_float(row.get("sss")),
+        safe_float(row.get("philhealth")),
+        safe_float(row.get("pagibig")),
+        safe_float(row.get("tax")),
+        safe_float(row.get("other_deductions")),
+        str(row.get("notes") or "")
+    )
     if r:
         pid = r[0]
         cur.execute("""
-        UPDATE payroll SET basic_pay=?, overtime_pay=?, allowances=?, sss=?, philhealth=?, pagibig=?, tax=?, other_deductions=?, notes=?, created_at=CURRENT_TIMESTAMP
+        UPDATE payroll SET basic_pay=?, overtime_pay=?, allowances=?, sss=?, philhealth=?,
+            pagibig=?, tax=?, other_deductions=?, notes=?, created_at=CURRENT_TIMESTAMP
         WHERE id=?
-        """, (
-            float(row.get("basic_pay") or 0),
-            float(row.get("overtime_pay") or 0),
-            float(row.get("allowances") or 0),
-            float(row.get("sss") or 0),
-            float(row.get("philhealth") or 0),
-            float(row.get("pagibig") or 0),
-            float(row.get("tax") or 0),
-            float(row.get("other_deductions") or 0),
-            str(row.get("notes") or ""),
-            pid
-        ))
+        """, (*fields, pid))
     else:
         cur.execute("""
         INSERT INTO payroll (emp_id, period_start, period_end, basic_pay, overtime_pay, allowances, sss, philhealth, pagibig, tax, other_deductions, notes)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            emp_id, period_start, period_end,
-            float(row.get("basic_pay") or 0),
-            float(row.get("overtime_pay") or 0),
-            float(row.get("allowances") or 0),
-            float(row.get("sss") or 0),
-            float(row.get("philhealth") or 0),
-            float(row.get("pagibig") or 0),
-            float(row.get("tax") or 0),
-            float(row.get("other_deductions") or 0),
-            str(row.get("notes") or "")
-        ))
+        """, (emp_id, period_start, period_end, *fields))
     conn.commit()
     conn.close()
 
-def delete_payroll_by_id(pay_id):
+def delete_payroll_by_id(pay_id: int):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("DELETE FROM payroll WHERE id=?", (pay_id,))
+    cur.execute("DELETE FROM payroll WHERE id=?", (int(pay_id),))
     conn.commit()
     conn.close()
 
@@ -268,23 +256,22 @@ def make_payslip_pdf(company_name, company_address, company_tin, payroll_row: di
     x0 = margin
     y = height - margin
 
-    # Header: user requested to be able to remove company profile - we leave company_name variable but it's used here.
-    # To remove company profile on payslip, you can leave company_name/company_address empty or delete this block.
     def draw_header():
         nonlocal y
+        drew = False
         if company_name:
             c.setFont("Helvetica-Bold", 14)
             c.drawString(x0, y, company_name)
-            y -= 14
+            y -= 14; drew = True
         if company_address:
             c.setFont("Helvetica", 10)
             c.drawString(x0, y, company_address)
-            y -= 12
+            y -= 12; drew = True
         if company_tin:
             c.setFont("Helvetica", 10)
             c.drawString(x0, y, f"TIN: {company_tin}")
-            y -= 12
-        if company_name or company_address or company_tin:
+            y -= 12; drew = True
+        if drew:
             c.line(x0, y, width - margin, y)
             y -= 14
 
@@ -319,16 +306,16 @@ def make_payslip_pdf(company_name, company_address, company_tin, payroll_row: di
     y -= 16
 
     earnings = [
-        ("Basic Pay", float(payroll_row.get("basic_pay") or 0)),
-        ("Overtime Pay", float(payroll_row.get("overtime_pay") or 0)),
-        ("Allowances", float(payroll_row.get("allowances") or 0)),
+        ("Basic Pay", safe_float(payroll_row.get("basic_pay"))),
+        ("Overtime Pay", safe_float(payroll_row.get("overtime_pay"))),
+        ("Allowances", safe_float(payroll_row.get("allowances"))),
     ]
     deductions = [
-        ("SSS", float(payroll_row.get("sss") or 0)),
-        ("PhilHealth", float(payroll_row.get("philhealth") or 0)),
-        ("Pag-IBIG", float(payroll_row.get("pagibig") or 0)),
-        ("Withholding Tax", float(payroll_row.get("tax") or 0)),
-        ("Other Deductions", float(payroll_row.get("other_deductions") or 0)),
+        ("SSS", safe_float(payroll_row.get("sss"))),
+        ("PhilHealth", safe_float(payroll_row.get("philhealth"))),
+        ("Pag-IBIG", safe_float(payroll_row.get("pagibig"))),
+        ("Withholding Tax", safe_float(payroll_row.get("tax"))),
+        ("Other Deductions", safe_float(payroll_row.get("other_deductions"))),
     ]
 
     gross = sum(v for _, v in earnings)
@@ -376,7 +363,7 @@ def make_payslip_pdf(company_name, company_address, company_tin, payroll_row: di
 
     c.setFont("Helvetica", 8)
     c.setFillColor(colors.grey)
-    c.drawString(x0, 12 * mm, f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')} via {COMPANY_NAME} Payslip Portal")
+    c.drawString(x0, 12 * mm, f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')} — {COMPANY_NAME} Payroll Portal")
 
     c.showPage()
     c.save()
@@ -384,7 +371,7 @@ def make_payslip_pdf(company_name, company_address, company_tin, payroll_row: di
     buf.close()
     return pdf
 
-# -------------------- CSV Helpers --------------------
+# -------------------- CSV & MERGE HELPERS --------------------
 def safe_read_csv(filelike):
     df = pd.read_csv(filelike, dtype=str)
     df.columns = [c.strip().lower() for c in df.columns]
@@ -425,7 +412,16 @@ def merge_duplicate_payrolls():
     conn.close()
     return merged_count
 
-# -------------------- UI: Auth --------------------
+# -------------------- BACKUP & RESTORE HELPERS --------------------
+def export_employees_csv() -> bytes:
+    df = list_employees_df()
+    return df.to_csv(index=False).encode("utf-8")
+
+def export_payroll_csv() -> bytes:
+    df = list_payroll_df()
+    return df.to_csv(index=False).encode("utf-8")
+
+# -------------------- UI: AUTH --------------------
 def login_ui():
     st.sidebar.subheader("Sign in")
     mode = st.sidebar.selectbox("Login as", ["Employee", "HR/Admin"])
@@ -453,7 +449,7 @@ def login_ui():
                 st.session_state["auth"] = res
                 st.rerun()
 
-# -------------------- UI: Dashboards --------------------
+# -------------------- UI: DASHBOARDS --------------------
 def employee_dashboard(company, address, tin):
     auth = st.session_state.get("auth") or {}
     emp_id = auth.get("emp_id") or auth.get("username")
@@ -469,8 +465,8 @@ def employee_dashboard(company, address, tin):
     df['period'] = df['period_start'] + " to " + df['period_end']
     period = st.selectbox("Select Pay Period", options=df['period'].tolist())
     row = df[df['period'] == period].iloc[0].to_dict()
-    gross = float(row.get("basic_pay") or 0) + float(row.get("overtime_pay") or 0) + float(row.get("allowances") or 0)
-    deductions = sum(float(row.get(k) or 0) for k in ["sss", "philhealth", "pagibig", "tax", "other_deductions"])
+    gross = safe_float(row.get("basic_pay")) + safe_float(row.get("overtime_pay")) + safe_float(row.get("allowances"))
+    deductions = sum(safe_float(row.get(k)) for k in ["sss", "philhealth", "pagibig", "tax", "other_deductions"])
     net = gross - deductions
     col1, col2, col3 = st.columns(3)
     col1.metric("Gross Pay", peso(gross))
@@ -484,8 +480,11 @@ def employee_dashboard(company, address, tin):
 def hr_dashboard(company, address, tin):
     st.header("🛠️ HR / Admin Dashboard")
     tabs = st.tabs([
-    "Employees", "Set/Reset Passwords", "Add/Manage Payroll","Bulk Uploads", "Merge Duplicates", "All Payroll Records", "Backup / Restore"])
-    # Employees tab
+        "Employees", "Set/Reset Passwords", "Add/Manage Payroll",
+        "Bulk Uploads", "Merge Duplicates", "All Payroll Records", "Backup / Restore"
+    ])
+
+    # --- Employees tab ---
     with tabs[0]:
         st.subheader("Employees")
         with st.expander("➕ Add / Update Employee"):
@@ -495,7 +494,7 @@ def hr_dashboard(company, address, tin):
                 full_name = st.text_input("Full Name *", key="e_name")
                 position = st.text_input("Position", key="e_pos")
             with col2:
-                department = st.text_input("Department", key="e_dept")
+                department = st.text_input("Department", key="e_dept", value=DEPARTMENT)
                 rate_type = st.selectbox("Rate Type", ["", "monthly", "daily", "hourly"], index=0, key="e_rate")
                 base_rate = st.number_input("Base Rate", min_value=0.0, step=0.01, value=0.0, key="e_base")
             if st.button("Save Employee", type="primary", key="save_emp"):
@@ -506,6 +505,7 @@ def hr_dashboard(company, address, tin):
                     st.error("Employee ID and Full Name are required.")
         st.write("Existing Employees:")
         st.dataframe(list_employees_df(), use_container_width=True)
+
         st.markdown("### Delete an Employee (removes employee record, user, payroll)")
         del_emp_id = st.text_input("Enter Employee ID to delete", key="del_emp")
         if st.button("Delete Employee"):
@@ -516,32 +516,31 @@ def hr_dashboard(company, address, tin):
                 st.warning("Enter an Employee ID.")
 
         st.markdown("### Bulk Upload Employees (CSV)")
-        st.caption("CSV columns required: emp_id, full_name (others optional: position, department, rate_type, base_rate)")
+        st.caption("CSV required columns: emp_id, full_name (optional: position, department, rate_type, base_rate)")
         emp_file = st.file_uploader("Upload employees.csv", type=["csv"], key="bulk_emp")
         if emp_file is not None:
             try:
                 df = safe_read_csv(emp_file)
-                df_cols = set(df.columns)
                 required = {"emp_id", "full_name"}
-                if not required.issubset(df_cols):
-                    st.error(f"CSV must include at least: {', '.join(required)}")
+                if not required.issubset(set(df.columns)):
+                    st.error(f"CSV must include: {', '.join(required)}")
                 else:
                     count = 0
                     for _, r in df.iterrows():
                         upsert_employee(
                             r.get("emp_id"),
                             r.get("full_name"),
-                            r.get("position") if "position" in df_cols else "",
-                            r.get("department") if "department" in df_cols else "",
-                            r.get("rate_type") if "rate_type" in df_cols else "",
-                            float(r.get("base_rate") or 0) if "base_rate" in df_cols else 0
+                            r.get("position", ""),
+                            r.get("department", ""),
+                            r.get("rate_type", ""),
+                            safe_float(r.get("base_rate"))
                         )
                         count += 1
                     st.success(f"Imported/updated {count} employees.")
             except Exception as e:
                 st.error(f"Failed to import employees: {e}")
 
-    # Passwords tab
+    # --- Passwords tab ---
     with tabs[1]:
         st.subheader("Set or Reset Employee Password")
         emp_id_pw = st.text_input("Employee ID", key="pw_empid")
@@ -555,6 +554,7 @@ def hr_dashboard(company, address, tin):
                     st.success("Password saved.")
                 except ValueError as e:
                     st.error(str(e))
+
         st.markdown("Delete a user account (removes login only):")
         del_user = st.text_input("Username to delete (employee emp_id or admin username)", key="del_user")
         if st.button("Delete User Account"):
@@ -564,13 +564,14 @@ def hr_dashboard(company, address, tin):
             else:
                 st.warning("Enter a username to delete")
 
-    # Add/manage payroll
+    # --- Add/manage payroll ---
     with tabs[2]:
         st.subheader("Add or Update Payroll Entry")
         emp_list = list_employees_df()
         emp_opts = [f"{r.full_name} ({r.emp_id})" for _, r in emp_list.iterrows()]
         selected = st.selectbox("Select Employee", options=["-"] + emp_opts, key="pay_select")
         selected_emp_id = selected.split("(")[-1].rstrip(")") if selected != "-" else None
+
         col1, col2, col3 = st.columns(3)
         with col1:
             period_start = st.date_input("Period Start", value=date.today(), key="p_start")
@@ -578,6 +579,7 @@ def hr_dashboard(company, address, tin):
             period_end = st.date_input("Period End", value=date.today(), key="p_end")
         with col3:
             notes = st.text_input("Notes (optional)", key="p_notes")
+
         colA, colB, colC = st.columns(3)
         with colA:
             basic_pay = st.number_input("Basic Pay", min_value=0.0, step=0.01, key="p_basic")
@@ -590,6 +592,7 @@ def hr_dashboard(company, address, tin):
         with colC:
             tax = st.number_input("Withholding Tax", min_value=0.0, step=0.01, key="p_tax")
             other_deductions = st.number_input("Other Deductions", min_value=0.0, step=0.01, key="p_other")
+
         if st.button("Save Payroll Entry", type="primary", key="save_payroll"):
             if not selected_emp_id:
                 st.error("Select an employee first.")
@@ -610,10 +613,25 @@ def hr_dashboard(company, address, tin):
                 })
                 st.success("Payroll saved (inserted or updated).")
 
-    # Bulk Uploads tab
+        st.divider()
+        st.subheader("Delete a Payroll Record by ID")
+        st.caption("Find the ID in the 'All Payroll Records' tab.")
+        pay_id_del = st.text_input("Payroll ID", key="del_pay_input")
+        if st.button("Delete Payroll Record", key="del_pay_btn"):
+            if pay_id_del:
+                try:
+                    delete_payroll_by_id(int(pay_id_del))
+                    st.success(f"Deleted payroll record {pay_id_del}")
+                except Exception as e:
+                    st.error(f"Error deleting payroll record: {e}")
+            else:
+                st.warning("Enter a payroll record id.")
+
+    # --- Bulk Uploads tab ---
     with tabs[3]:
         st.subheader("Bulk Uploads")
-        st.caption("Upload CSVs. Payroll CSV must have columns: emp_id, period_start, period_end. Numeric columns optional.")
+        st.markdown("#### Payroll (CSV)")
+        st.caption("Required columns: emp_id, period_start, period_end. Optional numeric: basic_pay, overtime_pay, allowances, sss, philhealth, pagibig, tax, other_deductions. Optional: notes.")
         pay_file = st.file_uploader("Upload payroll.csv", type=["csv"], key="bulk_pay")
         if pay_file:
             try:
@@ -628,14 +646,14 @@ def hr_dashboard(company, address, tin):
                             "emp_id": str(r.get("emp_id") or "").strip(),
                             "period_start": str(r.get("period_start") or "").strip(),
                             "period_end": str(r.get("period_end") or "").strip(),
-                            "basic_pay": float(r.get("basic_pay") or 0),
-                            "overtime_pay": float(r.get("overtime_pay") or 0),
-                            "allowances": float(r.get("allowances") or 0),
-                            "sss": float(r.get("sss") or 0),
-                            "philhealth": float(r.get("philhealth") or 0),
-                            "pagibig": float(r.get("pagibig") or 0),
-                            "tax": float(r.get("tax") or 0),
-                            "other_deductions": float(r.get("other_deductions") or 0),
+                            "basic_pay": safe_float(r.get("basic_pay")),
+                            "overtime_pay": safe_float(r.get("overtime_pay")),
+                            "allowances": safe_float(r.get("allowances")),
+                            "sss": safe_float(r.get("sss")),
+                            "philhealth": safe_float(r.get("philhealth")),
+                            "pagibig": safe_float(r.get("pagibig")),
+                            "tax": safe_float(r.get("tax")),
+                            "other_deductions": safe_float(r.get("other_deductions")),
                             "notes": str(r.get("notes") or "").strip()
                         }
                         insert_or_update_payroll(row)
@@ -644,110 +662,156 @@ def hr_dashboard(company, address, tin):
             except Exception as e:
                 st.error(f"Failed to import payroll: {e}")
 
-    # Merge Duplicates tab
+        st.divider()
+        st.markdown("#### Employees (CSV)")
+        st.caption("Required columns: emp_id, full_name (Optional: position, department, rate_type, base_rate)")
+        emp_file = st.file_uploader("Upload employees.csv", type=["csv"], key="bulk_emp2")
+        if emp_file is not None:
+            try:
+                df = safe_read_csv(emp_file)
+                required = {"emp_id", "full_name"}
+                if not required.issubset(set(df.columns)):
+                    st.error(f"Employees CSV must include: {', '.join(required)}")
+                else:
+                    count = 0
+                    for _, r in df.iterrows():
+                        upsert_employee(
+                            r.get("emp_id"),
+                            r.get("full_name"),
+                            r.get("position", ""),
+                            r.get("department", ""),
+                            r.get("rate_type", ""),
+                            safe_float(r.get("base_rate"))
+                        )
+                        count += 1
+                    st.success(f"Imported/updated {count} employees.")
+            except Exception as e:
+                st.error(f"Failed to import employees: {e}")
+
+        st.divider()
+        st.markdown("#### Download CSV Templates")
+        emp_template = pd.DataFrame([{
+            "emp_id": "EMP001",
+            "full_name": "Juan Dela Cruz",
+            "position": "Staff",
+            "department": DEPARTMENT,
+            "rate_type": "monthly",
+            "base_rate": "15000"
+        }])
+        pay_template = pd.DataFrame([{
+            "emp_id": "EMP001",
+            "period_start": "2025-08-01",
+            "period_end": "2025-08-15",
+            "basic_pay": "7500",
+            "overtime_pay": "500",
+            "allowances": "1000",
+            "sss": "600",
+            "philhealth": "450",
+            "pagibig": "100",
+            "tax": "800",
+            "other_deductions": "200",
+            "notes": "Example row"
+        }])
+        st.download_button("⬇️ employees_template.csv", emp_template.to_csv(index=False), "employees_template.csv", "text/csv")
+        st.download_button("⬇️ payroll_template.csv", pay_template.to_csv(index=False), "payroll_template.csv", "text/csv")
+
+    # --- Merge Duplicates tab ---
     with tabs[4]:
         st.subheader("Merge Duplicate Payroll Entries")
-        st.markdown("Duplicates are rows with same emp_id + period_start + period_end")
+        st.caption("Duplicates are rows with the same emp_id + period_start + period_end. Merging sums numeric fields and concatenates notes.")
         if st.button("Run Merge"):
             merged = merge_duplicate_payrolls()
             st.success(f"Merged {merged} rows." if merged else "No duplicates found.")
 
-    # All payroll + delete
+    # --- All Payroll Records tab ---
     with tabs[5]:
         st.subheader("All Payroll Records")
         st.dataframe(list_payroll_df(), use_container_width=True)
-        st.markdown("Delete a payroll record by ID (see 'id' column above):")
-        pay_id = st.text_input("Payroll ID to delete", key="del_payid")
-        if st.button("Delete payroll record"):
-            if pay_id:
-                try:
-                    delete_payroll_by_id(int(pay_id))
-                    st.success(f"Deleted payroll record {pay_id}")
-                except Exception as e:
-                    st.error(f"Error deleting payroll record: {e}")
-            else:
-                st.warning("Enter a payroll record id.")
 
-    # Back up and Restore
+    # --- Backup / Restore tab ---
     with tabs[6]:
         st.subheader("Backup / Restore")
 
         st.markdown("**Download Backups**")
         st.download_button(
-        "⬇️ Download employees.csv",
-        data=export_employees_csv(),
-        file_name="employees_backup.csv",
-        mime="text/csv"
+            "⬇️ Download employees.csv",
+            data=export_employees_csv(),
+            file_name="employees_backup.csv",
+            mime="text/csv"
         )
         st.download_button(
-        "⬇️ Download payroll.csv",
-        data=export_payroll_csv(),
-        file_name="payroll_backup.csv",
-        mime="text/csv"
+            "⬇️ Download payroll.csv",
+            data=export_payroll_csv(),
+            file_name="payroll_backup.csv",
+            mime="text/csv"
         )
 
         st.divider()
         st.markdown("**Restore from CSV**")
-
-        emp_file = st.file_uploader("Upload employees.csv", type=["csv"], key="restore_emp")
-            if emp_file is not None and st.button("Restore Employees"):
-                try:
-                    df = pd.read_csv(emp_file)
-            # expected columns: emp_id, full_name, position, department, rate_type, base_rate
-            for _, r in df.iterrows():
-                upsert_employee(
-                    r.get("emp_id"),
-                    r.get("full_name"),
-                    r.get("position", ""),
-                    r.get("department", ""),
-                    r.get("rate_type", ""),
-                    float(r.get("base_rate") or 0),
-                )
-                st.success(f"Employees restored: {len(df)}")
-                except Exception as e:
-                st.error(f"Restore failed: {e}")
-
-        pay_file = st.file_uploader("Upload payroll.csv", type=["csv"], key="restore_pay")
-            if pay_file is not None and st.button("Restore Payroll"):
-                try:
-                    dfp = pd.read_csv(pay_file)
-                    req = {"emp_id", "period_start", "period_end"}
-            if not req.issubset(set(dfp.columns)):
-                st.error("Payroll CSV must include emp_id, period_start, period_end")
-            else:
-                for _, r in dfp.iterrows():
-                    insert_or_update_payroll({
-                        "emp_id": r.get("emp_id"),
-                        "period_start": str(r.get("period_start")),
-                        "period_end": str(r.get("period_end")),
-                        "basic_pay": float(r.get("basic_pay") or 0),
-                        "overtime_pay": float(r.get("overtime_pay") or 0),
-                        "allowances": float(r.get("allowances") or 0),
-                        "sss": float(r.get("sss") or 0),
-                        "philhealth": float(r.get("philhealth") or 0),
-                        "pagibig": float(r.get("pagibig") or 0),
-                        "tax": float(r.get("tax") or 0),
-                        "other_deductions": float(r.get("other_deductions") or 0),
-                        "notes": str(r.get("notes") or ""),
-                    })
-                st.success(f"Payroll rows restored: {len(dfp)}")
+        emp_restore = st.file_uploader("Upload employees.csv", type=["csv"], key="restore_emp")
+        if emp_restore is not None and st.button("Restore Employees"):
+            try:
+                df = pd.read_csv(emp_restore)
+                required = {"emp_id", "full_name"}
+                if not required.issubset(set(df.columns)):
+                    st.error("Employees CSV must include emp_id, full_name")
+                else:
+                    for _, r in df.iterrows():
+                        upsert_employee(
+                            r.get("emp_id"),
+                            r.get("full_name"),
+                            r.get("position", ""),
+                            r.get("department", ""),
+                            r.get("rate_type", ""),
+                            safe_float(r.get("base_rate"))
+                        )
+                    st.success(f"Employees restored: {len(df)}")
             except Exception as e:
                 st.error(f"Restore failed: {e}")
 
+        pay_restore = st.file_uploader("Upload payroll.csv", type=["csv"], key="restore_pay")
+        if pay_restore is not None and st.button("Restore Payroll"):
+            try:
+                dfp = pd.read_csv(pay_restore)
+                req = {"emp_id", "period_start", "period_end"}
+                if not req.issubset(set(dfp.columns)):
+                    st.error("Payroll CSV must include emp_id, period_start, period_end")
+                else:
+                    for _, r in dfp.iterrows():
+                        insert_or_update_payroll({
+                            "emp_id": r.get("emp_id"),
+                            "period_start": str(r.get("period_start")),
+                            "period_end": str(r.get("period_end")),
+                            "basic_pay": safe_float(r.get("basic_pay")),
+                            "overtime_pay": safe_float(r.get("overtime_pay")),
+                            "allowances": safe_float(r.get("allowances")),
+                            "sss": safe_float(r.get("sss")),
+                            "philhealth": safe_float(r.get("philhealth")),
+                            "pagibig": safe_float(r.get("pagibig")),
+                            "tax": safe_float(r.get("tax")),
+                            "other_deductions": safe_float(r.get("other_deductions")),
+                            "notes": str(r.get("notes") or "")
+                        })
+                    st.success(f"Payroll rows restored: {len(dfp)}")
+            except Exception as e:
+                st.error(f"Restore failed: {e}")
 
 # -------------------- APP MAIN --------------------
 def main():
     st.set_page_config(page_title=f"{COMPANY_NAME} Payroll", page_icon="💸", layout="wide")
     init_db()
     ensure_admin_user()
+
     st.title(f"{COMPANY_NAME} — {DEPARTMENT}")
     st.caption("Payroll Portal — employees download payslips. HR/Admin manages payroll data.")
 
     with st.sidebar:
+        # Company Profile (shown on payslips). To remove from UI, delete this block.
         st.markdown("**Company Profile (appears on payslips)**")
         company_name = st.text_input("Company Name", value=COMPANY_NAME)
         company_address = st.text_input("Company Address", value="")
         company_tin = st.text_input("Company TIN (optional)", value="")
+        st.divider()
         if st.button("Sign out", use_container_width=True):
             st.session_state.pop("auth", None)
             st.rerun()
