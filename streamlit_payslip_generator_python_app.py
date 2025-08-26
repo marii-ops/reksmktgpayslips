@@ -28,7 +28,7 @@ from datetime import datetime, date
 
 import pandas as pd
 import streamlit as st
-from reportlab.lib.pagesizes import A4
+
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
 from reportlab.lib import colors
