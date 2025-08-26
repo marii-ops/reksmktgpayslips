@@ -59,7 +59,7 @@ def get_conn():
         host=cfg["host"],
         dbname=cfg.get("dbname", cfg.get("database", "postgres")),
         user=cfg["user"],
-        password=cfg["RAMS2025!!"],
+        password=cfg["YOUR-PASSWORD"],
         port=int(cfg.get("port", 5432)),
     )
     return conn
