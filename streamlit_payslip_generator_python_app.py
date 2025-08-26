@@ -36,6 +36,46 @@ from reportlab.lib import colors
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+import psycopg2
+import os
+
+# --- Connection settings ---
+# It’s best practice to store these as Streamlit Secrets, not hardcode them
+DB_HOST = st.secrets["DB_HOST"]
+DB_NAME = st.secrets["DB_NAME"]
+DB_USER = st.secrets["DB_USER"]
+DB_PASS = st.secrets["DB_PASS"]
+DB_PORT = st.secrets.get("DB_PORT", 5432)  # default PostgreSQL port
+
+# --- Function to create connection ---
+def get_connection():
+    return psycopg2.connect(
+        host=DB_HOST,
+        database=DB_NAME,
+        user=DB_USER,
+        password=DB_PASS,
+        port=DB_PORT
+    )
+
+# --- Streamlit App ---
+st.title("📊 Supabase PostgreSQL Demo")
+
+try:
+    conn = get_connection()
+    st.success("✅ Connected to Supabase Database")
+
+    # Example query: fetch first 10 rows from a table
+    query = "SELECT * FROM your_table LIMIT 10;"
+    df = pd.read_sql(query, conn)
+
+    st.subheader("Sample Data")
+    st.dataframe(df)
+
+    conn.close()
+except Exception as e:
+    st.error(f"❌ Connection failed: {e}")
+
+
 # -------------------- Config --------------------
 COMPANY_NAME = "REKS Amusement Com Inc"
 DEPARTMENT = "Marketing Department"
